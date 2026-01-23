@@ -1,0 +1,150 @@
+﻿/* Finder extension overlay styles */
+#finder-ext-root {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483647;
+  font-family: "Geist", "Segoe UI", system-ui, sans-serif;
+  color: #e5e7eb;
+  user-select: none;
+}
+
+#finder-ext-root .finder-panel {
+  min-width: 540px;
+  max-width: 720px;
+  background: #1b1f25;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#finder-ext-root .finder-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 170px;
+  align-items: center;
+  gap: 8px;
+}
+
+#finder-ext-root .finder-row.replace {
+  grid-template-columns: 24px minmax(0, 1fr) 170px;
+}
+
+#finder-ext-root .finder-toggle {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #2a2f36;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#finder-ext-root .finder-field {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #12151a;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+#finder-ext-root .finder-field input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e5e7eb;
+  font-size: 12px;
+}
+
+#finder-ext-root .finder-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+#finder-ext-root .finder-actions,
+#finder-ext-root .finder-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-start;
+}
+
+#finder-ext-root .finder-icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #2a2f36;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#finder-ext-root .finder-chip {
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #2a2f36;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+#finder-ext-root .finder-chip.active.blue {
+  border-color: rgba(96, 165, 250, 0.9);
+  background: rgba(59, 130, 246, 0.25);
+  color: #dbeafe;
+}
+
+#finder-ext-root .finder-chip.active.green {
+  border-color: rgba(52, 211, 153, 0.9);
+  background: rgba(16, 185, 129, 0.25);
+  color: #d1fae5;
+}
+
+#finder-ext-root .finder-chip.active.violet {
+  border-color: rgba(167, 139, 250, 0.9);
+  background: rgba(139, 92, 246, 0.25);
+  color: #ede9fe;
+}
+
+#finder-ext-root .finder-mini-btn {
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+  padding: 0 6px;
+  cursor: pointer;
+}
+
+#finder-ext-root .finder-mini-btn:hover,
+#finder-ext-root .finder-icon-btn:hover,
+#finder-ext-root .finder-chip:hover,
+#finder-ext-root .finder-toggle:hover {
+  color: #ffffff;
+}
+
+#finder-ext-root .finder-hidden {
+  display: none;
+}
+::highlight(finder-highlight) {
+  background: rgba(59, 130, 246, 0.35);
+  outline: 1px solid rgba(59, 130, 246, 0.7);
+}
+::highlight(finder-highlight-active) {
+  background: rgba(59, 130, 246, 0.7);
+  outline: 1px solid rgba(59, 130, 246, 0.9);
+}

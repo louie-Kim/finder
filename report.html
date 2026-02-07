@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Phase 6-8 Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #0f1115;
+        --panel: #161a22;
+        --muted: #9aa3b2;
+        --text: #e6eaf2;
+        --accent: #6aa6ff;
+        --border: #2b3240;
+        --code-bg: #0b0d12;
+        --code-border: #1f2530;
+        --tok-keyword: #7dd3fc;
+        --tok-string: #fbbf24;
+        --tok-fn: #a78bfa;
+        --tok-prop: #93c5fd;
+        --tok-comment: #94a3b8;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 980px;
+        margin: 32px auto 64px;
+        padding: 0 20px;
+      }
+      h1, h2, h3 {
+        margin: 0 0 12px;
+      }
+      h1 {
+        font-size: 28px;
+      }
+      h2 {
+        font-size: 20px;
+        margin-top: 28px;
+      }
+      h3 {
+        font-size: 16px;
+        margin-top: 18px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px 18px;
+        margin-top: 16px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+      .grid.two {
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 10px;
+        font-size: 14px;
+      }
+      th, td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      code, pre {
+        font-family: Consolas, "Courier New", monospace;
+      }
+      pre {
+        background: var(--code-bg);
+        border: 1px solid var(--code-border);
+        padding: 14px 16px;
+        border-radius: 12px;
+        overflow: auto;
+        line-height: 1.5;
+        margin: 12px 0 0;
+      }
+      .tok-keyword { color: var(--tok-keyword); }
+      .tok-string { color: var(--tok-string); }
+      .tok-fn { color: var(--tok-fn); }
+      .tok-prop { color: var(--tok-prop); }
+      .tok-comment { color: var(--tok-comment); }
+      .tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        font-size: 12px;
+        color: var(--muted);
+        margin-right: 6px;
+      }
+      .list {
+        margin: 8px 0 0 18px;
+      }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Phase 6-8 Implementation Report</h1>
+      <p class="muted">Project: finder | Report file: report.html</p>
+
+      <div class="card grid two">
+        <div>
+          <h3>Skill Used</h3>
+          <p><span class="tag">vercel-react-best-practices</span></p>
+          <p class="muted">Used for bundle optimization guidance and React/Next.js performance hygiene.</p>
+        </div>
+        <div>
+          <h3>Scope</h3>
+          <p class="muted">Phases 6-8 from plan.md: bundle baseline, dynamic import, and throttled match refresh.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Summary</h2>
+        <ul class="list">
+          <li>Added bundle analyzer tooling and captured baseline sizes.</li>
+          <li>Moved CodeMirror editor to a client-only dynamic import with a loading skeleton.</li>
+          <li>Throttled match recalculation using requestAnimationFrame to reduce update churn.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Phase Status</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Phase</th>
+              <th>Goal</th>
+              <th>Status</th>
+              <th>Evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>6</td>
+              <td>Bundle baseline (analyze)</td>
+              <td>Done</td>
+              <td><code>static/chunks/378.8af3ad2eccbf0227.js</code> (CodeMirror)</td>
+            </tr>
+            <tr>
+              <td>7</td>
+              <td>Dynamic import of editor</td>
+              <td>Done</td>
+              <td><code>app/components/EditorSection.tsx</code></td>
+            </tr>
+            <tr>
+              <td>8</td>
+              <td>Throttle match recalculation</td>
+              <td>Done</td>
+              <td><code>app/components/FindReplaceEditor.tsx</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Applied Best Practices</h2>
+        <ul class="list">
+          <li><strong>bundle-dynamic-imports</strong>: load heavy editor code on demand.</li>
+          <li><strong>rerender-dependencies</strong>: stabilized refresh scheduling with memoized callbacks.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Key Changes (with Highlighting)</h2>
+        <h3>Dynamic import + skeleton</h3>
+        <pre><code class="language-tsx"><span class="tok-keyword">const</span> FindReplaceEditor = <span class="tok-fn">dynamic</span>(
+  () =&gt; <span class="tok-keyword">import</span>(<span class="tok-string">"./FindReplaceEditor"</span>),
+  {
+    <span class="tok-prop">ssr</span>: <span class="tok-keyword">false</span>,
+    <span class="tok-comment">// skeleton UI while loading</span>
+    <span class="tok-prop">loading</span>: () =&gt; (
+      &lt;div className="mx-auto flex w-full max-w-5xl flex-col gap-6"&gt;
+        ...
+      &lt;/div&gt;
+    ),
+  }
+);</code></pre>
+
+        <h3>requestAnimationFrame throttling</h3>
+        <pre><code class="language-tsx"><span class="tok-keyword">const</span> scheduleRefresh = <span class="tok-fn">useCallback</span>(() =&gt; {
+  <span class="tok-keyword">if</span> (rafRef.current !== <span class="tok-keyword">null</span>) {
+    <span class="tok-fn">cancelAnimationFrame</span>(rafRef.current);
+  }
+  rafRef.current = <span class="tok-fn">requestAnimationFrame</span>(() =&gt; {
+    rafRef.current = <span class="tok-keyword">null</span>;
+    <span class="tok-fn">refreshMatches</span>();
+  });
+}, [refreshMatches]);</code></pre>
+      </div>
+
+      <div class="card">
+        <h2>Bundle Analyzer Setup</h2>
+        <ul class="list">
+          <li>Script: <code>pnpm analyze</code> (runs <code>next build</code> with webpack analyzer)</li>
+          <li>Report: <code>.next/analyze/client.html</code></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Files Touched</h2>
+        <ul class="list">
+          <li><code>package.json</code> (analyze script, deps)</li>
+          <li><code>next.config.ts</code> (bundle analyzer)</li>
+          <li><code>app/components/EditorSection.tsx</code> (dynamic import + skeleton)</li>
+          <li><code>app/page.tsx</code> (EditorSection wiring)</li>
+          <li><code>app/components/FindReplaceEditor.tsx</code> (rAF throttling)</li>
+          <li><code>plan.md</code> (Phase 6-8 completion notes)</li>
+        </ul>
+      </div>
+    </div>
+  </body>
+</html>

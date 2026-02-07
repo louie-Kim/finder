@@ -37,3 +37,5 @@ Use `npm run <script>` if you are not using pnpm, but keep `pnpm-lock.yaml` upda
 1. Treat the latest verified phase in `plan.md` as the source of truth; if you revert, restore that verified state so it remains the latest.
 2. Manage future improvements in `plan.md`. If additional improvements are needed later, refer to the phases in `plan.md`.
 3. Check phase boxes in `plan.md` as work is verified, and keep the most recent verified phase current.
+4. `plan.md` Phase 6-8 are for optimizing only the Next.js part using vercel-react-best-practices; do not touch the `extension/` code.
+5. When modifying extension logic, preserve the shortcut-open behavior so the Finder panel still opens via `Ctrl+Shift+F` on both Naver and Tistory editors.

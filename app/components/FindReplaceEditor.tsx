@@ -97,6 +97,7 @@ export default function FindReplaceEditor() {
   const viewRef = useRef<EditorView | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const matchesRef = useRef<MatchRange[]>([]);
+  const rafRef = useRef<number | null>(null);
 
   const [searchText, setSearchText] = useState("");
   const [replaceText, setReplaceText] = useState("");
@@ -122,6 +123,14 @@ export default function FindReplaceEditor() {
       useRegex,
     };
   }, [caseSensitive, searchText, useRegex, wholeWord]);
+
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+      }
+    };
+  }, []);
 
   const refreshMatches = useCallback(() => {
     const view = viewRef.current;
@@ -150,6 +159,16 @@ export default function FindReplaceEditor() {
     setMatchCount(matches.length);
     setActiveIndex(matches.length ? currentIndex + 1 : 0);
   }, []);
+
+  const scheduleRefresh = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+    }
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null;
+      refreshMatches();
+    });
+  }, [refreshMatches]);
 
   const query = useMemo(
     () =>
@@ -222,7 +241,7 @@ export default function FindReplaceEditor() {
         theme,
         EditorView.updateListener.of((update) => {
           if (update.docChanged || update.selectionSet) {
-            refreshMatches();
+            scheduleRefresh();
           }
         }),
       ],
@@ -241,7 +260,7 @@ export default function FindReplaceEditor() {
       view.destroy();
       viewRef.current = null;
     };
-  }, [refreshMatches]);
+  }, [refreshMatches, scheduleRefresh]);
 
   useEffect(() => {
     const view = viewRef.current;

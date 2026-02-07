@@ -1,4 +1,4 @@
-﻿import FindReplaceEditor from "./components/FindReplaceEditor";
+﻿import EditorSection from "./components/EditorSection";
 
 export default function Home() {
   return (
@@ -24,7 +24,7 @@ export default function Home() {
             </p>
           </header>
 
-          <FindReplaceEditor />
+          <EditorSection />
         </main>
       </div>
     </div>

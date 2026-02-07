@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "analyze": "cross-env ANALYZE=true next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },
@@ -19,10 +20,12 @@
     "react-dom": "19.2.3"
   },
   "devDependencies": {
+    "@next/bundle-analyzer": "^16.1.2",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "cross-env": "^7.0.3",
     "eslint": "^9",
     "eslint-config-next": "16.1.2",
     "tailwindcss": "^4",

@@ -14,6 +14,17 @@
     target: null,
     highlightDoc: null,
     lastSelectionText: "",
+    site: "generic",
+    refreshToken: 0,
+    refreshRaf: null,
+    titleHighlightTimer: null,
+    titleMatchOverlay: null,
+    lastSearchInputAt: 0,
+    lastRefreshKey: "",
+    lastAppliedHighlightKey: "",
+    suppressTistoryHighlightUntilSearchChange: false,
+    active_tistory_target_kind: "",
+    last_tistory_body_text_hash: "",
   };
 
   const root = document.createElement("div");
@@ -48,13 +59,19 @@
   });
   findInput.addEventListener("compositionend", () => {
     isComposing = false;
+    state.lastSearchInputAt = Date.now();
     state.searchText = findInput.value;
+    state.suppressTistoryHighlightUntilSearchChange = false;
     refreshMatches();
+    scheduleTitleHighlightSync();
   });
   findInput.addEventListener("input", () => {
     if (isComposing) return;
+    state.lastSearchInputAt = Date.now();
     state.searchText = findInput.value;
+    state.suppressTistoryHighlightUntilSearchChange = false;
     refreshMatches();
+    scheduleTitleHighlightSync();
   });
   findInput.addEventListener("keydown", (event) => {
     if (event.key === "ArrowUp") {
@@ -173,11 +190,67 @@
   document.documentElement.appendChild(root);
 
   const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+  const escapeHtml = (value) =>
+    String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  const toOverlayHtml = (value) =>
+    escapeHtml(value).replace(/ /g, "&nbsp;").replace(/\n/g, "<br>");
   const WORD_CHAR_REGEX = /[\p{L}\p{N}_]/u;
   const WORD_ONLY_REGEX = /^[\p{L}\p{N}_]+$/u;
+  const SITE_KIND = {
+    NAVER: "naver",
+    TISTORY: "tistory",
+    GENERIC: "generic",
+  };
+  const isElementNode = (value) =>
+    !!value &&
+    typeof value === "object" &&
+    value.nodeType === Node.ELEMENT_NODE &&
+    typeof value.tagName === "string";
+  const isTextAreaNode = (value) => isElementNode(value) && value.tagName === "TEXTAREA";
+  const isInputNode = (value) => isElementNode(value) && value.tagName === "INPUT";
+  const isTextInputNode = (value) => {
+    if (!isInputNode(value)) return false;
+    const type = (value.getAttribute("type") || "text").toLowerCase();
+    return ["text", "search", "url", "email", "tel", "password"].includes(type);
+  };
+  const isTextControlNode = (value) => isTextAreaNode(value) || isTextInputNode(value);
 
   const getDocWindow = (doc) => doc?.defaultView || window;
+  const getDocHref = (doc) => {
+    if (!doc) return "";
+    try {
+      return String(doc.location?.href || "");
+    } catch {
+      return "";
+    }
+  };
   const observedDocs = new WeakSet();
+  const observedFrames = new WeakSet();
+  const nodeIdMap = new WeakMap();
+  let nodeIdSeed = 1;
+  const getNodeId = (node) => {
+    if (!node || typeof node !== "object") return "none";
+    let nodeId = nodeIdMap.get(node);
+    if (!nodeId) {
+      nodeId = `n${nodeIdSeed++}`;
+      nodeIdMap.set(node, nodeId);
+    }
+    return nodeId;
+  };
+  const bumpRefreshToken = () => {
+    state.refreshToken += 1;
+  };
+  const hashText = (text) => {
+    const value = String(text || "");
+    let hash = 0;
+    for (let i = 0; i < value.length; i += 1) {
+      hash = (hash * 31 + value.charCodeAt(i)) | 0;
+    }
+    return `${value.length}:${hash}`;
+  };
   const collectFrameDocs = (doc, maxDepth = 2) => {
     const results = [];
     const visit = (current, depth) => {
@@ -197,7 +270,7 @@
     visit(doc, maxDepth);
     return results;
   };
-  const BLOG_EDITABLE_SELECTORS = [
+  const NAVER_EDITABLE_SELECTORS = [
     "[contenteditable='true']",
     "[contenteditable='plaintext-only']",
     "[role='textbox']",
@@ -210,13 +283,13 @@
     ".se-text-paragraph",
     ".se-component-content",
   ];
-  const BLOG_PARAGRAPH_SELECTORS = [
+  const NAVER_PARAGRAPH_SELECTORS = [
     ".se-title-text p.se-text-paragraph",
     ".se-documentTitle p.se-text-paragraph",
     ".se-section-text p.se-text-paragraph",
     ".se-text-paragraph",
   ];
-  const BLOG_ROOT_SELECTORS = [
+  const NAVER_ROOT_SELECTORS = [
     ".se-section.se-section-text",
     ".se-module.se-module-text",
     ".se-section-text",
@@ -224,11 +297,56 @@
     ".se-title-text",
     ".se-text",
   ];
-  const BLOG_FOCUSED_SELECTORS = [
+  const NAVER_FOCUSED_SELECTORS = [
     ".se-section.se-is-focused",
     ".se-section-text.se-is-focused",
     ".se-documentTitle.se-is-focused",
     ".se-title-text.se-is-focused",
+  ];
+  const TISTORY_EDITABLE_SELECTORS = [
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']",
+    "[role='textbox']",
+    "textarea",
+    ".ProseMirror",
+    ".toastui-editor-contents",
+    ".tt-editor-contents",
+    ".editor-body [contenteditable='true']",
+    "iframe#editor-tistory_ifr",
+  ];
+  const TISTORY_PARAGRAPH_SELECTORS = [
+    ".ProseMirror p",
+    ".toastui-editor-contents p",
+    ".tt-editor-contents p",
+    "[data-ke-editor] p",
+  ];
+  const TISTORY_ROOT_SELECTORS = [
+    ".ProseMirror",
+    ".toastui-editor-contents",
+    ".tt-editor-contents",
+    ".editor-body",
+    ".editor-wrap",
+    ".contents-wrap",
+    "[data-ke-editor]",
+    "[contenteditable='true']",
+  ];
+  // Tistory selector/priority table
+  // 1) focused/active root: .ProseMirror, .toastui-editor-contents, .tt-editor-contents, [data-ke-editor]
+  // 2) selection anchor -> closest TISTORY_ROOT_SELECTORS
+  // 3) fallback editable candidates -> TISTORY_EDITABLE_SELECTORS (highest score wins)
+  const TISTORY_FOCUSED_SELECTORS = [
+    ".ProseMirror-focused",
+    ".ProseMirror",
+    ".toastui-editor-contents",
+    ".tt-editor-contents",
+    "[data-ke-editor]",
+    "#kakao-editor-container",
+  ];
+
+  const TISTORY_IFRAME_SELECTORS = [
+    "iframe#editor-tistory_ifr",
+    "#kakao-editor-container iframe",
+    "iframe[id*='editor'][id*='ifr']",
   ];
 
   const getSelectionTextFromDocument = (doc) => {
@@ -394,9 +512,17 @@
       }
       cacheSelectionText(target, doc);
     };
+    const inputHandler = () => {
+      if (root.style.display != "none" && state.searchText) {
+        refreshMatches();
+      }
+    };
     doc.addEventListener(
       "selectionchange",
       () => {
+        if (root.style.display != "none" && isPanelInteractionActive()) {
+          return;
+        }
         const target = getActiveEditableInDocument(doc);
         if (target) {
           state.target = target;
@@ -414,6 +540,9 @@
     doc.addEventListener(
       "focusin",
       () => {
+        if (root.style.display != "none" && isPanelInteractionActive()) {
+          return;
+        }
         const target = getActiveEditableInDocument(doc);
         if (target) {
           state.target = target;
@@ -427,11 +556,39 @@
     );
     doc.addEventListener("mouseup", selectionCaptureHandler, true);
     doc.addEventListener("keyup", selectionCaptureHandler, true);
+    doc.addEventListener("input", inputHandler, true);
     doc.addEventListener("keydown", keydownHandler, true);
     doc.addEventListener("keydown", handleCloseShortcut, true);
   }
 
   function ensureFrameDocListeners() {
+    const frames = Array.from(document.querySelectorAll("iframe"));
+    for (const frame of frames) {
+      if (!(frame instanceof HTMLIFrameElement)) continue;
+      if (!observedFrames.has(frame)) {
+        observedFrames.add(frame);
+        frame.addEventListener(
+          "load",
+          () => {
+            try {
+              if (frame.contentDocument) {
+                ensureDocListeners(frame.contentDocument);
+              }
+            } catch {
+              // Ignore cross-origin frames.
+            }
+          },
+          true
+        );
+      }
+      try {
+        if (frame.contentDocument) {
+          ensureDocListeners(frame.contentDocument);
+        }
+      } catch {
+        // Ignore cross-origin frames.
+      }
+    }
     const frameDocs = collectFrameDocs(document, 2);
     for (const frameDoc of frameDocs) {
       ensureDocListeners(frameDoc);
@@ -440,10 +597,33 @@
 
   const getActiveEditableInDocument = (doc) => {
     if (!doc) return null;
+    const site = detectSiteKind(doc, getDocHref(doc));
+    const getSiteFallbackTarget = () => {
+      if (site === SITE_KIND.TISTORY) {
+        return getSiteContentRoot(site, doc) || findEditableFallback(doc);
+      }
+      return findEditableFallback(doc) || getSiteContentRoot(site, doc);
+    };
 
     const active = doc.activeElement;
+    if (
+      site === SITE_KIND.TISTORY &&
+      active instanceof HTMLBodyElement &&
+      active.isContentEditable
+    ) {
+      return active;
+    }
+    if (site === SITE_KIND.TISTORY && active instanceof HTMLIFrameElement) {
+      try {
+        const frameDoc = active.contentDocument;
+        const fromFrame = findTistoryBodyEditable(frameDoc || doc);
+        if (fromFrame) return fromFrame;
+      } catch {
+        // Ignore cross-origin access errors.
+      }
+    }
     if (active && isVisibleEditable(active)) {
-      if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) {
+      if (isTextControlNode(active)) {
         return active;
       }
       if (active.isContentEditable) {
@@ -453,72 +633,73 @@
 
     const selection = doc.getSelection();
     if (!selection || selection.rangeCount === 0) {
-      return isBlogWriteContext()
-        ? findEditableFallback(doc) || getBlogContentRoot(doc)
-        : null;
+      return isBlogWriteContext() ? getSiteFallbackTarget() : null;
     }
 
     const node = selection.anchorNode;
     if (!node) {
-      return isBlogWriteContext()
-        ? findEditableFallback(doc) || getBlogContentRoot(doc)
-        : null;
+      return isBlogWriteContext() ? getSiteFallbackTarget() : null;
     }
 
     const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
     if (!element) {
-      return isBlogWriteContext()
-        ? findEditableFallback(doc) || getBlogContentRoot(doc)
-        : null;
+      return isBlogWriteContext() ? getSiteFallbackTarget() : null;
     }
 
     const editableRoot = element.closest("[contenteditable]");
+    if (
+      site === SITE_KIND.TISTORY &&
+      editableRoot instanceof HTMLBodyElement &&
+      editableRoot.isContentEditable
+    ) {
+      return editableRoot;
+    }
     if (editableRoot && isVisibleEditable(editableRoot)) return editableRoot;
 
-    return isBlogWriteContext()
-      ? findEditableFallback(doc) || getBlogContentRoot(doc)
-      : null;
+    return isBlogWriteContext() ? getSiteFallbackTarget() : null;
   };
 
   const getActiveEditable = () => {
+    const site = getCurrentSiteKind();
+    if (site === SITE_KIND.TISTORY) {
+      const preferred = getPreferredTistoryTarget(null);
+      if (preferred) return preferred;
+    }
     const direct = getActiveEditableInDocument(document);
-    if (direct) return direct;
+    if (direct) return normalizeTargetForSite(site, direct);
 
     const active = document.activeElement;
     if (active instanceof HTMLIFrameElement) {
       try {
         const frameDoc = active.contentDocument;
         const fromFrame = getActiveEditableInDocument(frameDoc);
-        if (fromFrame) return fromFrame;
+        if (fromFrame) return normalizeTargetForSite(site, fromFrame);
       } catch {
         // Ignore cross-origin frames.
       }
     }
 
     if (isBlogWriteContext()) {
-      const blogDocTarget = findBlogEditableInDocument(document);
-      if (blogDocTarget) return blogDocTarget;
-      const fromFrames = findBlogEditableInFrames();
-      if (fromFrames) return fromFrames;
+      const blogDocTarget = findSiteEditableInDocument(site, document);
+      if (blogDocTarget) return normalizeTargetForSite(site, blogDocTarget);
+      const fromFrames = findSiteEditableInFrames(site);
+      if (fromFrames) return normalizeTargetForSite(site, fromFrames);
     }
 
     return null;
   };
 
   const isEditableElement = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
+    if (!isElementNode(el)) return false;
     if (el.closest("#finder-ext-root")) return false;
     if (el.isContentEditable) return true;
-    if (el.tagName === "TEXTAREA") return true;
-    if (el.tagName === "INPUT") {
-      const type = el.getAttribute("type") || "text";
-      return ["text", "search", "url", "email", "tel", "password"].includes(type);
-    }
+    if (isTextAreaNode(el)) return true;
+    if (isTextInputNode(el)) return true;
     return false;
   };
 
   const isVisibleElement = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
+    if (!isElementNode(el)) return false;
     if (el.closest("#finder-ext-root")) return false;
     if (el.getAttribute("aria-hidden") == "true") return false;
     const view = getDocWindow(el.ownerDocument);
@@ -548,11 +729,11 @@
     let bestScore = 0;
 
     for (const el of candidates) {
-      if (!(el instanceof HTMLElement)) continue;
+      if (!isElementNode(el)) continue;
       if (!isVisibleEditable(el)) continue;
 
       let textLength = 0;
-      if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+      if (isTextControlNode(el)) {
         textLength = (el.value || "").trim().length;
       } else if (el.isContentEditable) {
         textLength = (el.innerText || "").trim().length;
@@ -570,10 +751,61 @@
     return best;
   };
 
-  const getBlogContentRoot = (doc = document) =>
-    findBlogEditableInDocument(doc);
+  const isNaverEditorDocument = (doc = document) =>
+    !!doc.querySelector(
+      ".se-document, .se-content, .se-main, [data-se-root], .se-text-paragraph, .__se-node"
+    );
+  const isTistoryEditorDocument = (doc = document) =>
+    !!doc.querySelector(
+      ".ProseMirror, .toastui-editor-contents, .tt-editor-contents, [data-ke-editor], .editor-body [contenteditable='true'], iframe#editor-tistory_ifr, body#tinymce, .mce-content-body"
+    );
+  const isSiteEditorDocument = (site, doc = document) => {
+    if (site === SITE_KIND.NAVER) return isNaverEditorDocument(doc);
+    if (site === SITE_KIND.TISTORY) return isTistoryEditorDocument(doc);
+    return false;
+  };
 
-  const findBlogEditableInDocument = (doc) => {
+  const detectSiteKind = (doc = document, href = window.location.href || "") => {
+    const loweredHref = String(href || "").toLowerCase();
+    if (
+      isNaverEditorDocument(doc) ||
+      (loweredHref.includes("blog.naver.com") &&
+        /redirect=write|postwrite|smarteditor|se2|write|editor/i.test(loweredHref))
+    ) {
+      return SITE_KIND.NAVER;
+    }
+    if (
+      isTistoryEditorDocument(doc) ||
+      /\.tistory\.com\/manage\/newpost/i.test(loweredHref) ||
+      /\.tistory\.com\/manage(\/|$)/i.test(loweredHref)
+    ) {
+      return SITE_KIND.TISTORY;
+    }
+    return SITE_KIND.GENERIC;
+  };
+
+  const getCurrentSiteKind = () => {
+    const direct = detectSiteKind(document, getDocHref(document));
+    if (direct !== SITE_KIND.GENERIC) {
+      state.site = direct;
+      return direct;
+    }
+    const frameDocs = collectFrameDocs(document, 2);
+    for (const frameDoc of frameDocs) {
+      const detected = detectSiteKind(frameDoc, getDocHref(frameDoc));
+      if (detected !== SITE_KIND.GENERIC) {
+        state.site = detected;
+        return detected;
+      }
+    }
+    state.site = SITE_KIND.GENERIC;
+    return SITE_KIND.GENERIC;
+  };
+
+  const getSiteContentRoot = (site, doc = document) =>
+    findSiteEditableInDocument(site, doc);
+
+  const findNaverEditableInDocument = (doc) => {
     if (!doc) return null;
     const selection = doc.getSelection();
     if (selection && selection.anchorNode) {
@@ -581,28 +813,28 @@
         selection.anchorNode.nodeType === Node.ELEMENT_NODE
           ? selection.anchorNode
           : selection.anchorNode.parentElement;
-      if (element instanceof HTMLElement) {
-        const rootHit = element.closest(BLOG_ROOT_SELECTORS.join(","));
+      if (isElementNode(element)) {
+        const rootHit = element.closest(NAVER_ROOT_SELECTORS.join(","));
         if (rootHit) {
-          const resolved = resolveBlogTarget(rootHit);
+          const resolved = resolveNaverTarget(rootHit);
           if (resolved) return resolved;
         }
-        const paragraph = element.closest(BLOG_PARAGRAPH_SELECTORS.join(","));
+        const paragraph = element.closest(NAVER_PARAGRAPH_SELECTORS.join(","));
         if (paragraph) {
-          const resolved = resolveBlogTarget(paragraph);
+          const resolved = resolveNaverTarget(paragraph);
           if (resolved) return resolved;
         }
       }
     }
 
-    const paragraphs = Array.from(doc.querySelectorAll(BLOG_PARAGRAPH_SELECTORS.join(",")));
+    const paragraphs = Array.from(doc.querySelectorAll(NAVER_PARAGRAPH_SELECTORS.join(",")));
     let best = null;
     let bestScore = 0;
 
     for (const el of paragraphs) {
-      if (!(el instanceof HTMLElement)) continue;
+      if (!isElementNode(el)) continue;
       if (!isVisibleElement(el)) continue;
-      const resolved = resolveBlogTarget(el);
+      const resolved = resolveNaverTarget(el);
       if (!resolved) continue;
       const textLength = (el.innerText || "").trim().length;
       const rect = el.getBoundingClientRect();
@@ -616,12 +848,12 @@
 
     if (best) return best;
 
-    const nodes = Array.from(doc.querySelectorAll(BLOG_EDITABLE_SELECTORS.join(",")));
+    const nodes = Array.from(doc.querySelectorAll(NAVER_EDITABLE_SELECTORS.join(",")));
     let bestEditable = null;
     let bestEditableScore = 0;
 
     for (const el of nodes) {
-      if (!(el instanceof HTMLElement)) continue;
+      if (!isElementNode(el)) continue;
       if (!isVisibleElement(el)) continue;
       const isEditable = el.isContentEditable || el.tagName === "TEXTAREA" || el.tagName === "INPUT";
       if (!isEditable) continue;
@@ -638,15 +870,250 @@
     return bestEditable;
   };
 
-  const resolveBlogTarget = (el) => {
-    if (!(el instanceof HTMLElement)) return null;
-    const root = el.closest(BLOG_ROOT_SELECTORS.join(","));
-    if (root instanceof HTMLElement) return root;
+  const resolveNaverTarget = (el) => {
+    if (!isElementNode(el)) return null;
+    const root = el.closest(NAVER_ROOT_SELECTORS.join(","));
+    if (isElementNode(root)) return root;
     const editable = el.closest("[contenteditable='true'], [contenteditable='plaintext-only']");
-    if (editable instanceof HTMLElement) return editable;
-    const container = el.closest(BLOG_EDITABLE_SELECTORS.join(","));
-    if (container instanceof HTMLElement) return container;
+    if (isElementNode(editable)) return editable;
+    const container = el.closest(NAVER_EDITABLE_SELECTORS.join(","));
+    if (isElementNode(container)) return container;
     return el;
+  };
+
+  const resolveTistoryTarget = (el) => {
+    if (!isElementNode(el)) return null;
+    if (el instanceof HTMLIFrameElement) {
+      try {
+        const frameDoc = el.contentDocument;
+        const editable = findTistoryBodyEditable(frameDoc || document);
+        if (editable) return editable;
+      } catch {
+        // Ignore cross-origin access errors.
+      }
+    }
+    const root = el.closest(TISTORY_ROOT_SELECTORS.join(","));
+    if (isElementNode(root)) return root;
+    const editable = el.closest("[contenteditable='true'], [contenteditable='plaintext-only'], textarea");
+    if (isElementNode(editable)) return editable;
+    const container = el.closest(TISTORY_EDITABLE_SELECTORS.join(","));
+    if (isElementNode(container)) return container;
+    return el;
+  };
+
+  const getTistoryEditorIframeDoc = (doc = document) => {
+    if (!doc) return null;
+    if (
+      doc.body &&
+      (doc.body.id === "tinymce" ||
+        doc.body.classList?.contains("mce-content-body") ||
+        doc.querySelector(".mce-content-body"))
+    ) {
+      return doc;
+    }
+    const frames = [];
+    for (const selector of TISTORY_IFRAME_SELECTORS) {
+      const found = Array.from(doc.querySelectorAll(selector));
+      for (const frame of found) {
+        if (frame instanceof HTMLIFrameElement) frames.push(frame);
+      }
+    }
+    for (const frame of frames) {
+      try {
+        const frameDoc = frame.contentDocument;
+        if (!frameDoc) continue;
+        if (frameDoc.body) return frameDoc;
+      } catch {
+        // Ignore cross-origin access errors.
+      }
+    }
+    return null;
+  };
+
+  const getTistoryTinyMceBody = (doc = document) => {
+    const resolveBodyFromTinyMce = (hostWindow) => {
+      if (!hostWindow) return null;
+      try {
+        const tinymce = hostWindow.tinymce;
+        if (!tinymce || typeof tinymce.get !== "function") return null;
+        const editor =
+          tinymce.get("editor-tistory") ||
+          tinymce.activeEditor ||
+          (Array.isArray(tinymce.editors) ? tinymce.editors[0] : null);
+        const body = editor?.getBody?.();
+        if (isElementNode(body) && body.isContentEditable) {
+          return body;
+        }
+      } catch {
+        // Ignore access/runtime errors.
+      }
+      return null;
+    };
+
+    const ownWindow = getDocWindow(doc);
+    const ownBody = resolveBodyFromTinyMce(ownWindow);
+    if (ownBody) return ownBody;
+
+    try {
+      const topWindow = window.top;
+      if (topWindow && topWindow !== ownWindow) {
+        const topBody = resolveBodyFromTinyMce(topWindow);
+        if (topBody) return topBody;
+      }
+    } catch {
+      // Ignore cross-origin access errors.
+    }
+
+    return null;
+  };
+
+  const findTistoryBodyEditable = (doc = document) => {
+    if (!doc) return null;
+    const tinyMceBody = getTistoryTinyMceBody(doc);
+    if (tinyMceBody) return tinyMceBody;
+    const tinymceBody = doc.querySelector("body#tinymce, body.mce-content-body");
+    if (isElementNode(tinymceBody) && tinymceBody.isContentEditable) {
+      return tinymceBody;
+    }
+    if (doc.body && doc.body.isContentEditable) {
+      return doc.body;
+    }
+    const frameDoc = getTistoryEditorIframeDoc(doc);
+    if (!frameDoc) return null;
+    const candidates = [
+      frameDoc.querySelector("#tinymce"),
+      frameDoc.querySelector(".mce-content-body"),
+      frameDoc.querySelector("[contenteditable='true']"),
+      frameDoc.body,
+    ];
+    for (const candidate of candidates) {
+      if (!isElementNode(candidate)) continue;
+      if (!candidate.isContentEditable && candidate !== frameDoc.body) continue;
+      if (candidate === frameDoc.body && !candidate.isContentEditable) continue;
+      return candidate;
+    }
+    return null;
+  };
+
+  const getPreferredTistoryTarget = (currentTarget = null) => {
+    const titleInput = document.querySelector("#post-title-inp");
+    const titleText = isTextAreaNode(titleInput) ? titleInput.value || "" : "";
+    const currentIsTitleTarget =
+      isTextAreaNode(currentTarget) && currentTarget.id === "post-title-inp";
+    if (
+      isTextAreaNode(titleInput) &&
+      document.activeElement === titleInput
+    ) {
+      return titleInput;
+    }
+
+    const frameDoc = getSiteFrameDocument(SITE_KIND.TISTORY) || getTistoryEditorIframeDoc(document);
+    const bodyEditable = findTistoryBodyEditable(frameDoc || document);
+    const bodyText =
+      isElementNode(bodyEditable)
+        ? bodyEditable.innerText || bodyEditable.textContent || ""
+        : "";
+    if (currentIsTitleTarget && textContainsCurrentQueryLoosely(titleText)) {
+      return currentTarget;
+    }
+    if (textContainsCurrentQueryLoosely(titleText) && isTextAreaNode(titleInput)) {
+      return titleInput;
+    }
+    if (textContainsCurrentQueryLoosely(bodyText) && bodyEditable) {
+      return bodyEditable;
+    }
+
+    if (
+      currentIsTitleTarget &&
+      bodyEditable &&
+      state.searchText &&
+      !textContainsCurrentQueryLoosely(titleText)
+    ) {
+      return bodyEditable;
+    }
+
+    if (frameDoc) {
+      const frameActive = frameDoc.activeElement;
+      if (
+        frameActive === frameDoc.body ||
+        (isElementNode(frameActive) &&
+          (frameActive.isContentEditable || frameActive.closest(".mce-content-body")))
+      ) {
+        return bodyEditable || frameActive;
+      }
+      const selection = frameDoc.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const anchor = selection.anchorNode;
+        if (anchor) {
+          return bodyEditable || frameDoc.body;
+        }
+      }
+    }
+
+    if (isElementNode(currentTarget)) return currentTarget;
+    if (bodyEditable) return bodyEditable;
+    if (isTextAreaNode(titleInput)) return titleInput;
+    return null;
+  };
+
+  const normalizeTargetForSite = (site, target) => {
+    if (!isElementNode(target)) return target;
+    if (site === SITE_KIND.TISTORY) {
+      return resolveTistoryTarget(target) || target;
+    }
+    return target;
+  };
+
+  const findTistoryEditableInDocument = (doc) => {
+    if (!doc) return null;
+    const bodyEditable = findTistoryBodyEditable(doc);
+    if (bodyEditable) return bodyEditable;
+
+    const selection = doc.getSelection();
+    if (selection && selection.anchorNode) {
+      const anchor =
+        selection.anchorNode.nodeType === Node.ELEMENT_NODE
+          ? selection.anchorNode
+          : selection.anchorNode.parentElement;
+      if (isElementNode(anchor)) {
+        const fromSelection = resolveTistoryTarget(anchor);
+        if (fromSelection && isVisibleElement(fromSelection)) return fromSelection;
+      }
+    }
+
+    const active = doc.activeElement;
+    if (isElementNode(active)) {
+      const fromActive = resolveTistoryTarget(active);
+      if (fromActive && isVisibleElement(fromActive)) return fromActive;
+    }
+
+    const candidates = Array.from(doc.querySelectorAll(TISTORY_EDITABLE_SELECTORS.join(",")));
+    let best = null;
+    let bestScore = 0;
+    for (const el of candidates) {
+      if (!isElementNode(el)) continue;
+      const resolved = resolveTistoryTarget(el);
+      if (!isElementNode(resolved)) continue;
+      if (!isVisibleElement(resolved)) continue;
+      const textLength = (resolved.innerText || resolved.value || "").trim().length;
+      const rect = resolved.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      const rootBonus = resolved.matches(".ProseMirror, .toastui-editor-contents, .tt-editor-contents")
+        ? 10000
+        : 0;
+      const score = area + textLength * 1000 + rootBonus;
+      if (score > bestScore) {
+        best = resolved;
+        bestScore = score;
+      }
+    }
+    return best;
+  };
+
+  const findSiteEditableInDocument = (site, doc) => {
+    if (site === SITE_KIND.NAVER) return findNaverEditableInDocument(doc);
+    if (site === SITE_KIND.TISTORY) return findTistoryEditableInDocument(doc);
+    return null;
   };
 
   const findEditableInFrames = () => {
@@ -654,19 +1121,21 @@
     for (const frameDoc of frameDocs) {
       const direct = getActiveEditableInDocument(frameDoc);
       if (direct) return direct;
-      const fallback = findEditableFallback(frameDoc) || getBlogContentRoot(frameDoc);
+      const site = detectSiteKind(frameDoc, getDocHref(frameDoc));
+      const fallback = findEditableFallback(frameDoc) || getSiteContentRoot(site, frameDoc);
       if (fallback) return fallback;
     }
     return null;
   };
 
-  const findBlogEditableInFrames = () => {
+  const findSiteEditableInFrames = (site) => {
+    if (site === SITE_KIND.GENERIC) return null;
     let best = null;
     let bestScore = 0;
 
     const frameDocs = collectFrameDocs(document, 2);
     for (const frameDoc of frameDocs) {
-      const candidate = findBlogEditableInDocument(frameDoc);
+      const candidate = findSiteEditableInDocument(site, frameDoc);
       if (!candidate) continue;
       const rect = candidate.getBoundingClientRect();
       const area = rect.width * rect.height;
@@ -681,27 +1150,85 @@
     return best;
   };
 
-  const getBlogFrameDocument = () => {
-    const iframe =
-      document.querySelector("iframe[name='mainFrame']") ||
-      document.querySelector("iframe[src*='PostWriteForm.naver']");
-    let baseDoc = null;
-    if (iframe instanceof HTMLIFrameElement) {
-      try {
-        baseDoc = iframe.contentDocument || null;
-      } catch {
-        baseDoc = null;
+  const getSiteFrameDocument = (site) => {
+    if (site === SITE_KIND.NAVER) {
+      const iframe =
+        document.querySelector("iframe[name='mainFrame']") ||
+        document.querySelector("iframe[src*='PostWriteForm.naver']");
+      let baseDoc = null;
+      if (iframe instanceof HTMLIFrameElement) {
+        try {
+          baseDoc = iframe.contentDocument || null;
+        } catch {
+          baseDoc = null;
+        }
+      }
+      if (baseDoc && isSiteEditorDocument(site, baseDoc)) return baseDoc;
+      if (baseDoc) {
+        const nestedDocs = collectFrameDocs(baseDoc, 2);
+        const nested = nestedDocs.find((doc) => isSiteEditorDocument(site, doc));
+        if (nested) return nested;
       }
     }
-    if (baseDoc && isBlogEditorDocument(baseDoc)) return baseDoc;
-    if (baseDoc) {
-      const nestedDocs = collectFrameDocs(baseDoc, 2);
-      const nested = nestedDocs.find((doc) => isBlogEditorDocument(doc));
-      if (nested) return nested;
+    if (site === SITE_KIND.TISTORY) {
+      const directIframe = document.querySelector("#editor-tistory_ifr");
+      if (directIframe instanceof HTMLIFrameElement) {
+        try {
+          const directDoc = directIframe.contentDocument;
+          if (
+            directDoc &&
+            directDoc.body &&
+            directDoc.body.id === "tinymce" &&
+            directDoc.body.isContentEditable
+          ) {
+            return directDoc;
+          }
+        } catch {
+          // Ignore cross-origin access errors.
+        }
+      }
+      const tistoryDoc = getTistoryEditorIframeDoc(document);
+      if (tistoryDoc) return tistoryDoc;
     }
     const fallbackDocs = collectFrameDocs(document, 2);
-    const fallback = fallbackDocs.find((doc) => isBlogEditorDocument(doc));
+    const fallback = fallbackDocs.find((doc) => isSiteEditorDocument(site, doc));
     return fallback || null;
+  };
+
+  const getContextDocumentForSite = (site) => {
+    if (site === SITE_KIND.GENERIC) return document;
+    return getSiteFrameDocument(site) || document;
+  };
+
+  const getPreferredTargetForSite = (site, target) => {
+    if (site === SITE_KIND.TISTORY) {
+      return getPreferredTistoryTarget(target) || target;
+    }
+    return target;
+  };
+
+  const getInitialTargetForSite = (site) => {
+    if (site === SITE_KIND.GENERIC) {
+      return getActiveEditable() || findEditableFallback() || findEditableInFrames();
+    }
+    const siteDoc = getContextDocumentForSite(site);
+    if (site === SITE_KIND.TISTORY) {
+      const bodyTarget = findTistoryBodyEditable(siteDoc);
+      if (bodyTarget) return bodyTarget;
+      return (
+        getFocusedSiteRoot(site, siteDoc) ||
+        findSiteEditableInDocument(site, siteDoc) ||
+        findEditableFallback() ||
+        findEditableInFrames()
+      );
+    }
+    return (
+      getFocusedSiteRoot(site, siteDoc) ||
+      findSiteEditableInDocument(site, siteDoc) ||
+      findSiteEditableInFrames(site) ||
+      findEditableFallback() ||
+      findEditableInFrames()
+    );
   };
 
   const getInputBufferBody = (doc) => {
@@ -719,8 +1246,13 @@
     return null;
   };
 
-  const dispatchInputEvents = (target, text) => {
-    if (!target || typeof InputEvent === "undefined") return;
+  const dispatchInputEvents = (target, text, options = {}) => {
+    if (!target) return;
+    if (options.plainInputEvent) {
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+    if (typeof InputEvent === "undefined") return;
     try {
       const beforeInput = new InputEvent("beforeinput", {
         bubbles: true,
@@ -744,52 +1276,160 @@
     }
   };
 
-  const getFocusedBlogRoot = (doc) => {
+  const syncInputValue = (target, nextValue, insertedText = "", options = {}) => {
+    if (!isTextControlNode(target)) return;
+    const proto =
+      isTextAreaNode(target)
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+    if (descriptor?.set) {
+      descriptor.set.call(target, nextValue);
+    } else {
+      target.value = nextValue;
+    }
+    dispatchInputEvents(target, insertedText, options);
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const getFocusedSiteRoot = (site, doc) => {
     if (!doc) return null;
-    const focused = doc.querySelector(BLOG_FOCUSED_SELECTORS.join(","));
-    if (focused instanceof HTMLElement && isVisibleElement(focused)) {
-      return focused;
+    if (site === SITE_KIND.NAVER) {
+      const focused = doc.querySelector(NAVER_FOCUSED_SELECTORS.join(","));
+      if (isElementNode(focused) && isVisibleElement(focused)) {
+        return focused;
+      }
+      return null;
+    }
+    if (site === SITE_KIND.TISTORY) {
+      if (
+        doc.body &&
+        doc.body.id === "tinymce" &&
+        doc.body.isContentEditable
+      ) {
+        return doc.body;
+      }
+      const iframeEditable = findTistoryBodyEditable(doc);
+      if (iframeEditable) return iframeEditable;
+      const focusedBySelector = doc.querySelector(TISTORY_FOCUSED_SELECTORS.join(","));
+      if (isElementNode(focusedBySelector) && isVisibleElement(focusedBySelector)) {
+        const resolved = resolveTistoryTarget(focusedBySelector);
+        if (isElementNode(resolved) && isVisibleElement(resolved)) return resolved;
+      }
+      const active = doc.activeElement;
+      if (isElementNode(active)) {
+        const focused = resolveTistoryTarget(active);
+        if (isElementNode(focused) && isVisibleElement(focused)) return focused;
+      }
     }
     return null;
   };
 
-  const getBlogSearchRoots = (doc) => {
-    if (!doc) return [];
-    const componentRoots = Array.from(
-      doc.querySelectorAll(".se-components-wrap .se-component")
-    ).filter((el) => el instanceof HTMLElement && isVisibleElement(el));
-    if (componentRoots.length) {
-      return componentRoots.filter((root) => {
-        return !componentRoots.some(
-          (other) => other !== root && other.contains(root)
-        );
-      });
+  const getTistorySearchRoots = (doc, target) => {
+    if (!doc) return isElementNode(target) ? [target] : [];
+    const tinyMceBody =
+      (doc.body &&
+      doc.body.id === "tinymce" &&
+      doc.body.isContentEditable
+        ? doc.body
+        : null) || findTistoryBodyEditable(doc);
+    if (tinyMceBody) {
+      return [tinyMceBody];
     }
-    const roots = Array.from(doc.querySelectorAll(BLOG_ROOT_SELECTORS.join(","))).filter(
-      (el) => el instanceof HTMLElement && isVisibleElement(el)
-    );
-    if (roots.length) {
-      const normalized = roots.filter((root) => {
-        return !roots.some((other) => other !== root && other.contains(root));
-      });
-      return normalized;
+    const normalizedTarget = normalizeTargetForSite(SITE_KIND.TISTORY, target);
+    const roots = [];
+    const pushRoot = (root) => {
+      if (!isElementNode(root)) return;
+      if (!isVisibleElement(root)) return;
+      if (!roots.some((saved) => saved === root || saved.contains(root))) {
+        const filtered = roots.filter((saved) => !root.contains(saved));
+        roots.length = 0;
+        roots.push(...filtered, root);
+      }
+    };
+
+    const focused = getFocusedSiteRoot(SITE_KIND.TISTORY, doc);
+    if (focused) pushRoot(focused);
+
+    if (isElementNode(normalizedTarget) && normalizedTarget.ownerDocument === doc) {
+      pushRoot(normalizedTarget);
     }
-    return Array.from(doc.querySelectorAll(BLOG_PARAGRAPH_SELECTORS.join(","))).filter(
-      (el) => el instanceof HTMLElement && isVisibleElement(el)
-    );
+
+    const paragraphRoots = Array.from(doc.querySelectorAll(TISTORY_PARAGRAPH_SELECTORS.join(",")));
+    for (const paragraph of paragraphRoots) {
+      if (!isElementNode(paragraph)) continue;
+      if (isElementNode(normalizedTarget) && paragraph.contains(normalizedTarget)) {
+        pushRoot(paragraph.closest(TISTORY_ROOT_SELECTORS.join(",")) || paragraph);
+      }
+    }
+
+    const discoveredRoots = Array.from(doc.querySelectorAll(TISTORY_ROOT_SELECTORS.join(",")));
+    for (const root of discoveredRoots) {
+      if (!isElementNode(root)) continue;
+      if (
+        isElementNode(normalizedTarget) &&
+        root !== normalizedTarget &&
+        !root.contains(normalizedTarget) &&
+        !normalizedTarget.contains(root)
+      ) {
+        continue;
+      }
+      pushRoot(root);
+    }
+
+    if (!roots.length && isElementNode(normalizedTarget)) {
+      pushRoot(normalizedTarget);
+    }
+
+    return roots;
   };
 
-  const isBlogEditorDocument = (doc = document) =>
-    !!doc.querySelector(
-      ".se-document, .se-content, .se-main, [data-se-root], .se-text-paragraph, .__se-node"
-    );
-
-  const isBlogWriteContext = () => {
-    if (isBlogEditorDocument(document)) return true;
-    const href = window.location.href || "";
-    if (!href.includes("blog.naver.com")) return false;
-    return /Redirect=Write|PostWrite|postwrite|smarteditor|se2|write|editor/i.test(href);
+  const getSearchRootsForSite = (site, doc, target) => {
+    if (!doc) return isElementNode(target) ? [target] : [];
+    if (site === SITE_KIND.NAVER) {
+      const componentRoots = Array.from(
+        doc.querySelectorAll(".se-components-wrap .se-component")
+      ).filter((el) => isElementNode(el) && isVisibleElement(el));
+      if (componentRoots.length) {
+        return componentRoots.filter((root) => {
+          return !componentRoots.some(
+            (other) => other !== root && other.contains(root)
+          );
+        });
+      }
+      const roots = Array.from(doc.querySelectorAll(NAVER_ROOT_SELECTORS.join(","))).filter(
+        (el) => isElementNode(el) && isVisibleElement(el)
+      );
+      if (roots.length) {
+        return roots.filter((root) => !roots.some((other) => other !== root && other.contains(root)));
+      }
+      return Array.from(doc.querySelectorAll(NAVER_PARAGRAPH_SELECTORS.join(","))).filter(
+        (el) => isElementNode(el) && isVisibleElement(el)
+      );
+    }
+    if (site === SITE_KIND.TISTORY) {
+      const roots = getTistorySearchRoots(doc, target);
+      if (roots.length) return roots;
+    }
+    return isElementNode(target) ? [target] : [];
   };
+
+  const isPlaceholderNodeForSite = (site, node) => {
+    if (!isElementNode(node)) return false;
+    if (site === SITE_KIND.NAVER) {
+      return node.classList.contains("__se_placeholder") || node.classList.contains("se-placeholder");
+    }
+    if (site === SITE_KIND.TISTORY) {
+      return (
+        node.classList.contains("placeholder") ||
+        node.classList.contains("is-empty") ||
+        node.getAttribute("data-placeholder") != null
+      );
+    }
+    return false;
+  };
+
+  const isBlogWriteContext = () => getCurrentSiteKind() !== SITE_KIND.GENERIC;
 
   const getSearchRegex = () => {
     if (!state.searchText) return null;
@@ -815,6 +1455,24 @@
     return new RegExp(source, state.caseSensitive ? "gu" : "giu");
   };
 
+  const textMatchesCurrentQuery = (text) => {
+    if (!state.searchText || typeof text !== "string") return false;
+    const regex = getSearchRegex();
+    if (!regex) return false;
+    const localRegex = new RegExp(regex.source, regex.flags);
+    return localRegex.test(text);
+  };
+
+  const textContainsCurrentQueryLoosely = (text) => {
+    if (!state.searchText || typeof text !== "string") return false;
+    if (state.useRegex) {
+      return textMatchesCurrentQuery(text);
+    }
+    const needle = state.caseSensitive ? state.searchText : state.searchText.toLowerCase();
+    const haystack = state.caseSensitive ? text : text.toLowerCase();
+    return haystack.includes(needle);
+  };
+
   const isPanelInteractionActive = () => {
     const active = document.activeElement;
     if (!active) return false;
@@ -825,7 +1483,8 @@
     if (!doc || index < 0) return null;
     const regex = state.useRegex ? getSearchRegex() : null;
     if (state.useRegex && !regex) return null;
-    const roots = getBlogSearchRoots(doc);
+    const site = getCurrentSiteKind();
+    const roots = getSearchRootsForSite(site, doc, state.target);
     if (!roots.length) return null;
 
     const needle = state.caseSensitive ? state.searchText : state.searchText.toLowerCase();
@@ -834,15 +1493,11 @@
     let count = 0;
 
     for (const root of roots) {
-      if (!(root instanceof HTMLElement)) continue;
+      if (!isElementNode(root)) continue;
       const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
         acceptNode: (node) => {
           const parent = node.parentElement;
-          if (
-            parent &&
-            (parent.classList.contains("__se_placeholder") ||
-              parent.classList.contains("se-placeholder"))
-          ) {
+          if (parent && isPlaceholderNodeForSite(site, parent)) {
             return NodeFilter.FILTER_REJECT;
           }
           return NodeFilter.FILTER_ACCEPT;
@@ -891,31 +1546,111 @@
     return null;
   };
 
-  const refreshMatches = () => {
+  const getRefreshStateKey = (site, target) => {
+    const targetId = getNodeId(target);
+    const targetDocId =
+      target && target.ownerDocument ? getNodeId(target.ownerDocument) : "none";
+    let cursorKey = "";
+    if (isTextControlNode(target)) {
+      const start = target.selectionStart ?? 0;
+      const end = target.selectionEnd ?? 0;
+      cursorKey = `${start}:${end}:${(target.value || "").length}`;
+    } else if (isElementNode(target)) {
+      const doc = target.ownerDocument || document;
+      const selection = doc.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        cursorKey = `${getNodeId(range.startContainer)}:${range.startOffset}:${getNodeId(
+          range.endContainer
+        )}:${range.endOffset}`;
+      }
+    }
+    return [
+      site,
+      state.searchText,
+      state.caseSensitive,
+      state.wholeWord,
+      state.useRegex,
+      targetId,
+      targetDocId,
+      cursorKey,
+      state.refreshToken,
+    ].join("|");
+  };
+
+  const performRefreshMatches = () => {
     const previousActiveIndex = state.activeIndex;
-    state.matches = [];
-    state.activeIndex = 0;
+    const site = getCurrentSiteKind();
+    if (site === SITE_KIND.TISTORY && state.suppressTistoryHighlightUntilSearchChange) {
+      state.matches = [];
+      state.activeIndex = 0;
+      state.lastRefreshKey = "";
+      updateCount();
+      clearHighlights();
+      hideTitleMatchOverlay();
+      return;
+    }
 
     let target = state.target;
-    if (!target && isBlogWriteContext()) {
-      target =
-        findBlogEditableInDocument(document) ||
-        findBlogEditableInFrames() ||
-        findEditableFallback() ||
-        getBlogContentRoot() ||
-        findEditableInFrames();
+    if (site === SITE_KIND.TISTORY) {
+      const keepTitleTarget =
+        isTextAreaNode(target) && target.id === "post-title-inp";
+      const directIframe = document.querySelector("#editor-tistory_ifr");
+      try {
+        const directBody = directIframe?.contentDocument?.body;
+        if (
+          !keepTitleTarget &&
+          isElementNode(directBody) &&
+          directBody.id === "tinymce" &&
+          directBody.isContentEditable
+        ) {
+          state.target = directBody;
+          target = directBody;
+        }
+      } catch {
+        // Ignore cross-origin access errors.
+      }
+      const tistoryDoc = getSiteFrameDocument(site) || getTistoryEditorIframeDoc(document);
+      const tistoryBody = findTistoryBodyEditable(tistoryDoc || document);
+      if (
+        !keepTitleTarget &&
+        isElementNode(tistoryBody) &&
+        tistoryBody.isContentEditable
+      ) {
+        state.target = tistoryBody;
+        target = tistoryBody;
+      }
+    }
+    if (!target) {
+      target = getInitialTargetForSite(site);
       state.target = target;
     }
-    if (isBlogWriteContext()) {
-      const frameDoc = getBlogFrameDocument();
-      const blogDoc = frameDoc || document;
-      const focusedRoot = getFocusedBlogRoot(blogDoc);
-      const blogTarget = focusedRoot || findBlogEditableInDocument(blogDoc);
+    if (site !== SITE_KIND.GENERIC) {
+      const siteDoc = getContextDocumentForSite(site);
+      const focusedRoot = getFocusedSiteRoot(site, siteDoc);
+      const blogTarget = focusedRoot || findSiteEditableInDocument(site, siteDoc);
       if (blogTarget) {
         state.target = blogTarget;
         target = blogTarget;
       }
     }
+    const preferredTarget = getPreferredTargetForSite(site, target);
+    if (preferredTarget) {
+      state.target = preferredTarget;
+      target = preferredTarget;
+    }
+    target = normalizeTargetForSite(site, target);
+    if (target) {
+      state.target = target;
+    }
+    const refreshKey = getRefreshStateKey(site, target);
+    if (state.lastRefreshKey === refreshKey) {
+      return;
+    }
+    state.lastRefreshKey = refreshKey;
+
+    state.matches = [];
+    state.activeIndex = 0;
     const regex = state.useRegex ? getSearchRegex() : null;
     if (!target || (state.useRegex && !regex)) {
       updateCount();
@@ -971,7 +1706,7 @@
       }
     };
 
-    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    if (isTextControlNode(target)) {
       const text = target.value || "";
       if (state.useRegex) {
         let match = null;
@@ -985,10 +1720,16 @@
       } else {
         collectLiteralMatches(text, null);
       }
-    } else if (target instanceof HTMLElement) {
+    } else if (isElementNode(target)) {
       const doc = target.ownerDocument || document;
-      const blogDoc = isBlogWriteContext() ? getBlogFrameDocument() || doc : doc;
-      const roots = isBlogWriteContext() ? getBlogSearchRoots(blogDoc) : [];
+      const frameDoc = site !== SITE_KIND.GENERIC ? getSiteFrameDocument(site) : null;
+      const blogDoc =
+        site === SITE_KIND.TISTORY
+          ? target.ownerDocument || frameDoc || doc
+          : site !== SITE_KIND.GENERIC
+            ? frameDoc || doc
+            : doc;
+      const roots = getSearchRootsForSite(site, blogDoc, target);
       const searchRoots = roots.length ? roots : [target];
       if (roots.length && target.ownerDocument !== roots[0].ownerDocument) {
         state.target = roots[0];
@@ -997,16 +1738,12 @@
       }
 
       for (const root of searchRoots) {
-        if (!(root instanceof HTMLElement)) continue;
+        if (!isElementNode(root)) continue;
         const walkerDoc = root.ownerDocument || doc;
         const walker = walkerDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
           acceptNode: (node) => {
             const parent = node.parentElement;
-            if (
-              parent &&
-              (parent.classList.contains("__se_placeholder") ||
-                parent.classList.contains("se-placeholder"))
-            ) {
+            if (parent && isPlaceholderNodeForSite(site, parent)) {
               return NodeFilter.FILTER_REJECT;
             }
             return NodeFilter.FILTER_ACCEPT;
@@ -1046,6 +1783,30 @@
     applyHighlights();
   };
 
+  const refreshMatches = (options = {}) => {
+    if (options.bumpToken !== false) {
+      bumpRefreshToken();
+    }
+    if (state.refreshRaf !== null) {
+      cancelAnimationFrame(state.refreshRaf);
+    }
+    state.refreshRaf = requestAnimationFrame(() => {
+      state.refreshRaf = null;
+      performRefreshMatches();
+    });
+  };
+
+  const refreshMatchesNow = (options = {}) => {
+    if (options.bumpToken !== false) {
+      bumpRefreshToken();
+    }
+    if (state.refreshRaf !== null) {
+      cancelAnimationFrame(state.refreshRaf);
+      state.refreshRaf = null;
+    }
+    performRefreshMatches();
+  };
+
   const resolveActiveIndex = (target, matches, previousActiveIndex) => {
     if (!matches.length) return 0;
 
@@ -1055,7 +1816,7 @@
       return 0;
     }
 
-    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    if (isTextControlNode(target)) {
       const cursor = target.selectionStart ?? 0;
       let index = matches.findIndex(
         (match) => cursor >= match.start && cursor <= match.end
@@ -1066,7 +1827,7 @@
       return index === -1 ? matches.length - 1 : index;
     }
 
-    if (target instanceof HTMLElement) {
+    if (isElementNode(target)) {
       const doc = target.ownerDocument || document;
       const selection = doc.getSelection();
       if (!selection || selection.rangeCount === 0) return 0;
@@ -1110,10 +1871,11 @@
     view.CSS.highlights.delete("finder-highlight");
     view.CSS.highlights.delete("finder-highlight-active");
     state.highlightDoc = null;
+    state.lastAppliedHighlightKey = "";
   };
 
   const applyHighlights = () => {
-    if (!state.target || !(state.target instanceof HTMLElement)) {
+    if (!state.target || !isElementNode(state.target)) {
       clearHighlights();
       return;
     }
@@ -1126,9 +1888,23 @@
         prevView.CSS.highlights.delete("finder-highlight");
       }
     }
+    const activeIndex = state.activeIndex - 1;
+    const first = state.matches[0];
+    const last = state.matches[state.matches.length - 1];
+    const highlightKey = [
+      getNodeId(doc),
+      activeIndex,
+      state.matches.length,
+      first ? `${getNodeId(first.node)}:${first.start}:${first.end}` : "none",
+      last ? `${getNodeId(last.node)}:${last.start}:${last.end}` : "none",
+    ].join("|");
+    if (state.lastAppliedHighlightKey === highlightKey && state.highlightDoc === doc) {
+      return;
+    }
+    state.lastAppliedHighlightKey = highlightKey;
+
     const highlight = new Highlight();
     const activeHighlight = new Highlight();
-    const activeIndex = state.activeIndex - 1;
     for (let index = 0; index < state.matches.length; index += 1) {
       const match = state.matches[index];
       if (!match.node) continue;
@@ -1146,15 +1922,197 @@
     state.highlightDoc = doc;
   };
 
+  const applyTextControlActiveMatch = ({ forceFocus = false } = {}) => {
+    const target = state.target;
+    if (!isTextControlNode(target)) return;
+    if (!state.matches.length) return;
+    const index = Math.max(0, state.activeIndex - 1);
+    const match = state.matches[index] || state.matches[0];
+    if (!match) return;
+    if (forceFocus && target.id !== "post-title-inp") {
+      try {
+        target.focus({ preventScroll: true });
+      } catch {
+        target.focus();
+      }
+    }
+    try {
+      target.setSelectionRange(match.start, match.end);
+    } catch {
+      // Ignore selection errors on unsupported controls.
+    }
+  };
+
+  const getTistoryTitleInput = (doc = document) => {
+    if (!doc) return null;
+    const titleInput = doc.querySelector("#post-title-inp");
+    if (!isTextAreaNode(titleInput)) return null;
+    return titleInput;
+  };
+
+  const hideTitleMatchOverlay = () => {
+    if (!isElementNode(state.titleMatchOverlay)) return;
+    state.titleMatchOverlay.style.display = "none";
+  };
+
+  const ensureTitleMatchOverlay = (titleInput) => {
+    if (!isTextAreaNode(titleInput)) return null;
+    const wrapper = titleInput.parentElement;
+    if (!isElementNode(wrapper)) return null;
+    const wrapperStyle = getDocWindow(wrapper.ownerDocument).getComputedStyle(wrapper);
+    if (wrapperStyle.position === "static") {
+      wrapper.style.position = "relative";
+    }
+    let overlay = state.titleMatchOverlay;
+    if (!isElementNode(overlay) || overlay.ownerDocument !== titleInput.ownerDocument) {
+      overlay = titleInput.ownerDocument.createElement("div");
+      overlay.className = "finder-title-match-overlay";
+      overlay.style.position = "absolute";
+      overlay.style.top = "0";
+      overlay.style.left = "0";
+      overlay.style.pointerEvents = "none";
+      overlay.style.whiteSpace = "pre-wrap";
+      overlay.style.overflow = "hidden";
+      overlay.style.wordBreak = "break-word";
+      overlay.style.zIndex = "2147483646";
+      overlay.style.display = "none";
+      overlay.setAttribute("aria-hidden", "true");
+      wrapper.appendChild(overlay);
+      state.titleMatchOverlay = overlay;
+      return overlay;
+    }
+    if (!overlay.isConnected || overlay.parentElement !== wrapper) {
+      wrapper.appendChild(overlay);
+    }
+    return overlay;
+  };
+
+  const getTitleMatches = (value) => {
+    if (!state.searchText) return [];
+    const regex = getSearchRegex();
+    if (!regex) return [];
+    const matches = [];
+    const localRegex = new RegExp(regex.source, regex.flags);
+    let match = null;
+    while ((match = localRegex.exec(value))) {
+      matches.push({ start: match.index, end: match.index + match[0].length });
+      if (match[0].length === 0) localRegex.lastIndex += 1;
+    }
+    return matches;
+  };
+
+  const applyTitleMatchOverlay = () => {
+    if (root.style.display == "none") {
+      hideTitleMatchOverlay();
+      return;
+    }
+    if (getCurrentSiteKind() !== SITE_KIND.TISTORY) {
+      hideTitleMatchOverlay();
+      return;
+    }
+    const titleInput = getTistoryTitleInput(document);
+    if (!titleInput) {
+      hideTitleMatchOverlay();
+      return;
+    }
+    const value = titleInput.value || "";
+    const matches = getTitleMatches(value);
+    if (!matches.length) {
+      hideTitleMatchOverlay();
+      return;
+    }
+    const overlay = ensureTitleMatchOverlay(titleInput);
+    if (!overlay) return;
+
+    const style = getDocWindow(titleInput.ownerDocument).getComputedStyle(titleInput);
+    const titleTextColor = style.color || "#111827";
+    overlay.style.font = style.font;
+    overlay.style.fontFamily = style.fontFamily;
+    overlay.style.fontSize = style.fontSize;
+    overlay.style.fontWeight = style.fontWeight;
+    overlay.style.fontStyle = style.fontStyle;
+    overlay.style.lineHeight = style.lineHeight;
+    overlay.style.letterSpacing = style.letterSpacing;
+    overlay.style.textTransform = style.textTransform;
+    overlay.style.textIndent = style.textIndent;
+    overlay.style.textAlign = style.textAlign;
+    overlay.style.paddingTop = style.paddingTop;
+    overlay.style.paddingRight = style.paddingRight;
+    overlay.style.paddingBottom = style.paddingBottom;
+    overlay.style.paddingLeft = style.paddingLeft;
+    overlay.style.borderTopWidth = style.borderTopWidth;
+    overlay.style.borderRightWidth = style.borderRightWidth;
+    overlay.style.borderBottomWidth = style.borderBottomWidth;
+    overlay.style.borderLeftWidth = style.borderLeftWidth;
+    overlay.style.borderTopStyle = style.borderTopStyle;
+    overlay.style.borderRightStyle = style.borderRightStyle;
+    overlay.style.borderBottomStyle = style.borderBottomStyle;
+    overlay.style.borderLeftStyle = style.borderLeftStyle;
+    overlay.style.borderTopColor = "transparent";
+    overlay.style.borderRightColor = "transparent";
+    overlay.style.borderBottomColor = "transparent";
+    overlay.style.borderLeftColor = "transparent";
+    overlay.style.boxSizing = style.boxSizing;
+    overlay.style.borderRadius = style.borderRadius;
+    overlay.style.color = "transparent";
+    overlay.style.background = "transparent";
+    overlay.style.top = `${titleInput.offsetTop}px`;
+    overlay.style.left = `${titleInput.offsetLeft}px`;
+    overlay.style.height = `${Math.max(titleInput.clientHeight, titleInput.scrollHeight)}px`;
+    overlay.style.width = `${titleInput.clientWidth}px`;
+    overlay.scrollTop = titleInput.scrollTop;
+    overlay.scrollLeft = titleInput.scrollLeft;
+
+    const target = state.target;
+    const activeIndex =
+      isTextAreaNode(target) && target.id === "post-title-inp"
+        ? Math.max(0, Math.min(matches.length - 1, state.activeIndex - 1))
+        : -1;
+    let cursor = 0;
+    const htmlParts = [];
+    for (let i = 0; i < matches.length; i += 1) {
+      const hit = matches[i];
+      if (hit.start > cursor) {
+        htmlParts.push(toOverlayHtml(value.slice(cursor, hit.start)));
+      }
+      const hitStyle =
+        i === activeIndex
+          ? `background:rgba(59,130,246,.7);outline:1px solid rgba(59,130,246,.9);color:${titleTextColor};`
+          : `background:rgba(59,130,246,.35);outline:1px solid rgba(59,130,246,.7);color:${titleTextColor};`;
+      htmlParts.push(
+        `<span style="${hitStyle}">${toOverlayHtml(value.slice(hit.start, hit.end))}</span>`
+      );
+      cursor = hit.end;
+    }
+    if (cursor < value.length) {
+      htmlParts.push(toOverlayHtml(value.slice(cursor)));
+    }
+    overlay.innerHTML = htmlParts.join("");
+    overlay.style.display = "block";
+  };
+
+  function scheduleTitleHighlightSync() {
+    if (state.titleHighlightTimer) {
+      clearTimeout(state.titleHighlightTimer);
+      state.titleHighlightTimer = null;
+    }
+    state.titleHighlightTimer = setTimeout(() => {
+      state.titleHighlightTimer = null;
+      if (root.style.display == "none") return;
+      if (getCurrentSiteKind() !== SITE_KIND.TISTORY) return;
+      applyTitleMatchOverlay();
+    }, 220);
+  }
+
   const selectMatch = (match) => {
     if (!match) return;
     const target = state.target;
     if (!target) return;
 
-    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    if (isTextControlNode(target)) {
       target.focus();
       target.setSelectionRange(match.start, match.end);
-    } else if (target instanceof HTMLElement && match.node) {
+    } else if (isElementNode(target) && match.node) {
       const doc = target.ownerDocument || document;
       const range = doc.createRange();
       range.setStart(match.node, match.start);
@@ -1171,7 +2129,11 @@
   const gotoMatch = (direction) => {
     const target = resolveReplaceTarget();
     if (!target) return;
-    refreshMatches();
+    if (getCurrentSiteKind() === SITE_KIND.TISTORY) {
+      state.suppressTistoryHighlightUntilSearchChange = false;
+      state.lastRefreshKey = "";
+    }
+    refreshMatchesNow({ bumpToken: false });
     if (!state.matches.length) return;
     let nextIndex = state.activeIndex - 1 + direction;
     if (nextIndex < 0) nextIndex = state.matches.length - 1;
@@ -1180,24 +2142,18 @@
     selectMatch(state.matches[nextIndex]);
     updateCount();
     applyHighlights();
+    applyTextControlActiveMatch();
   };
 
   const resolveReplaceTarget = () => {
     let target = state.target;
+    const site = getCurrentSiteKind();
     if (!target) {
-      target = getActiveEditable();
+      target = getInitialTargetForSite(site);
     }
-    if (!target && isBlogWriteContext()) {
-      const frameDoc = getBlogFrameDocument();
-      const blogDoc = frameDoc || document;
-      target =
-        getFocusedBlogRoot(blogDoc) ||
-        findBlogEditableInDocument(blogDoc) ||
-        findBlogEditableInFrames() ||
-        findEditableFallback() ||
-        findEditableInFrames();
-    }
+    target = getPreferredTargetForSite(site, target);
     if (!target) return null;
+    target = normalizeTargetForSite(site, target);
     state.target = target;
     ensureDocListeners(target.ownerDocument || document);
     return target;
@@ -1237,7 +2193,16 @@
     return false;
   };
 
+  const replaceTextNodeRange = (node, start, end, replacement) => {
+    if (!node) return false;
+    const text = node.nodeValue || "";
+    if (start < 0 || end < start || end > text.length) return false;
+    node.nodeValue = text.slice(0, start) + replacement + text.slice(end);
+    return true;
+  };
+
   const replaceCurrent = (overrideIndex) => {
+    const site = getCurrentSiteKind();
     const target = resolveReplaceTarget();
     if (!target) {
       if (isTopFrame) {
@@ -1251,7 +2216,7 @@
     }
     const previousTarget = state.target;
     state.target = target;
-    if (isTopFrame && target.ownerDocument !== document) {
+    if (isTopFrame && target.ownerDocument !== document && site !== SITE_KIND.TISTORY) {
       if (
         postMessageToFrameByDoc(target.ownerDocument, {
           type: "finder-replace-current",
@@ -1269,7 +2234,7 @@
         : state.activeIndex > 0
           ? state.activeIndex - 1
           : -1;
-    refreshMatches();
+    refreshMatchesNow();
     if (!state.matches.length) return;
     if (resolvedIndex < 0) resolvedIndex = 0;
     if (resolvedIndex >= state.matches.length) {
@@ -1282,18 +2247,24 @@
     if (!regex) return;
 
     const activeTarget = state.target || target;
-    if (
-      activeTarget instanceof HTMLTextAreaElement ||
-      activeTarget instanceof HTMLInputElement
-    ) {
+    if (isTextControlNode(activeTarget)) {
+      const isTistoryTitleTarget =
+        site === SITE_KIND.TISTORY &&
+        isTextAreaNode(activeTarget) &&
+        activeTarget.id === "post-title-inp";
       const text = activeTarget.value || "";
       const singleFlags = regex.flags.replace("g", "");
       const singleRegex = new RegExp(regex.source, singleFlags);
       const before = text.slice(0, match.start);
       const targetText = text.slice(match.start, match.end);
       const replacement = targetText.replace(singleRegex, state.replaceText);
-      activeTarget.value = before + replacement + text.slice(match.end);
-    } else if (activeTarget instanceof HTMLElement && match.node) {
+      const nextValue = before + replacement + text.slice(match.end);
+      syncInputValue(activeTarget, nextValue, state.replaceText, {
+        plainInputEvent: isTistoryTitleTarget,
+      });
+      const nextCaret = before.length + replacement.length;
+      activeTarget.setSelectionRange(nextCaret, nextCaret);
+    } else if (isElementNode(activeTarget) && match.node) {
       activeTarget.focus();
       const doc = match.node.ownerDocument || document;
       const selection = doc.getSelection();
@@ -1303,42 +2274,55 @@
       range.setEnd(match.node, match.end);
       selection.removeAllRanges();
       selection.addRange(range);
-      const replaced = doc.execCommand("insertText", false, state.replaceText);
-      if (!replaced && match.node) {
-        const text = match.node.nodeValue || "";
-        match.node.nodeValue =
-          text.slice(0, match.start) + state.replaceText + text.slice(match.end);
+      if (site === SITE_KIND.TISTORY) {
+        replaceTextNodeRange(match.node, match.start, match.end, state.replaceText);
+      } else {
+        const replaced = doc.execCommand("insertText", false, state.replaceText);
+        if (!replaced && match.node) {
+          replaceTextNodeRange(match.node, match.start, match.end, state.replaceText);
+        }
       }
     }
 
-    refreshMatches();
+    if (site === SITE_KIND.TISTORY) {
+      state.suppressTistoryHighlightUntilSearchChange = false;
+      state.lastRefreshKey = "";
+      clearHighlights();
+      hideTitleMatchOverlay();
+      refreshMatchesNow({ bumpToken: false });
+      applyTextControlActiveMatch();
+      scheduleTitleHighlightSync();
+    } else {
+      refreshMatchesNow();
+    }
     state.target = activeTarget;
   };
 
   const replaceAll = () => {
     const regex = getSearchRegex();
-    if (regex && isBlogWriteContext()) {
+    const site = getCurrentSiteKind();
+    if (regex && site === SITE_KIND.NAVER) {
       const nodes = Array.from(document.querySelectorAll(".__se-node"));
       if (nodes.length) {
         for (const node of nodes) {
-          if (!(node instanceof HTMLElement)) continue;
+          if (!isElementNode(node)) continue;
           const text = node.textContent || "";
           node.textContent = text.replace(regex, state.replaceText);
         }
-        refreshMatches();
+        refreshMatchesNow();
         return;
       }
     }
-    if (isTopFrame && isBlogWriteContext()) {
-      const frameDoc = getBlogFrameDocument();
+    if (isTopFrame && site === SITE_KIND.NAVER) {
+      const frameDoc = getSiteFrameDocument(site);
       if (frameDoc && regex) {
         const nodes = Array.from(frameDoc.querySelectorAll(".__se-node"));
         for (const node of nodes) {
-          if (!(node instanceof HTMLElement)) continue;
+          if (!isElementNode(node)) continue;
           const text = node.textContent || "";
           node.textContent = text.replace(regex, state.replaceText);
         }
-        refreshMatches();
+        refreshMatchesNow();
         return;
       }
     }
@@ -1352,7 +2336,7 @@
       }
       return;
     }
-    if (isTopFrame && target.ownerDocument !== document) {
+    if (isTopFrame && target.ownerDocument !== document && site !== SITE_KIND.TISTORY) {
       if (
         postMessageToFrameByDoc(target.ownerDocument, {
           type: "finder-replace-all",
@@ -1362,13 +2346,20 @@
         return;
       }
     }
-    refreshMatches();
+    refreshMatchesNow({ bumpToken: false });
     if (!regex) return;
 
-    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    if (isTextControlNode(target)) {
+      const isTistoryTitleTarget =
+        site === SITE_KIND.TISTORY &&
+        isTextAreaNode(target) &&
+        target.id === "post-title-inp";
       const text = target.value || "";
-      target.value = text.replace(regex, state.replaceText);
-    } else if (target instanceof HTMLElement) {
+      const nextValue = text.replace(regex, state.replaceText);
+      syncInputValue(target, nextValue, state.replaceText, {
+        plainInputEvent: isTistoryTitleTarget,
+      });
+    } else if (isElementNode(target)) {
       const matches = state.matches.filter((match) => match.node);
       if (!matches.length) return;
       target.focus();
@@ -1385,18 +2376,32 @@
         b.range.compareBoundaryPoints(Range.START_TO_START, a.range)
       );
       for (const { match, range } of withRanges) {
-        selection.removeAllRanges();
-        selection.addRange(range);
-        const replaced = doc.execCommand("insertText", false, state.replaceText);
-        if (!replaced && match.node) {
-          const text = match.node.nodeValue || "";
-          match.node.nodeValue =
-            text.slice(0, match.start) + state.replaceText + text.slice(match.end);
+        if (site === SITE_KIND.TISTORY) {
+          if (match.node) {
+            replaceTextNodeRange(match.node, match.start, match.end, state.replaceText);
+          }
+        } else {
+          selection.removeAllRanges();
+          selection.addRange(range);
+          const replaced = doc.execCommand("insertText", false, state.replaceText);
+          if (!replaced && match.node) {
+            replaceTextNodeRange(match.node, match.start, match.end, state.replaceText);
+          }
         }
       }
     }
 
-    refreshMatches();
+    if (site === SITE_KIND.TISTORY) {
+      state.suppressTistoryHighlightUntilSearchChange = true;
+      state.matches = [];
+      state.activeIndex = 0;
+      state.lastRefreshKey = "";
+      updateCount();
+      clearHighlights();
+      hideTitleMatchOverlay();
+    } else {
+      refreshMatchesNow();
+    }
   };
 
   const openPanel = (showReplace) => {
@@ -1410,6 +2415,10 @@
   const closePanel = () => {
     root.classList.add("finder-hidden");
     root.style.display = "none";
+    if (state.titleHighlightTimer) {
+      clearTimeout(state.titleHighlightTimer);
+      state.titleHighlightTimer = null;
+    }
   };
 
   const isTopFrame = window.top === window;
@@ -1499,24 +2508,20 @@
       return;
     }
 
+    const site = getCurrentSiteKind();
     let target = getActiveEditable();
-    if (!target && (forceOpen || isBlogWriteContext())) {
-      if (isBlogWriteContext()) {
-        const frameDoc = getBlogFrameDocument();
-        const blogDoc = frameDoc || document;
-        target = getFocusedBlogRoot(blogDoc) || findBlogEditableInDocument(blogDoc);
-      }
-      if (!target) {
-        target = findEditableFallback() || findEditableInFrames();
-      }
+    if (!target && (forceOpen || site !== SITE_KIND.GENERIC)) {
+      target = getInitialTargetForSite(site);
     }
     if (!target) {
-      if (forceOpen || isBlogWriteContext()) {
-        broadcastToChildFrames(forceOpen || isBlogWriteContext());
+      if (forceOpen || site !== SITE_KIND.GENERIC) {
+        broadcastToChildFrames(forceOpen || site !== SITE_KIND.GENERIC);
       }
       return;
     }
+    target = getPreferredTargetForSite(site, target);
 
+    target = normalizeTargetForSite(site, target);
     state.target = target;
     ensureDocListeners(target.ownerDocument || document);
     openPanel(false);
@@ -1524,20 +2529,20 @@
     const selectionText =
       selectionTextOverride ||
       (target ? getSelectionText(target) : "") ||
-      getSelectionTextFromDocument(getBlogFrameDocument()) ||
-      getSelectionTextFromSelectionBlocks(getBlogFrameDocument());
+      getSelectionTextFromDocument(getSiteFrameDocument(site)) ||
+      getSelectionTextFromSelectionBlocks(getSiteFrameDocument(site));
     if (selectionText) {
       state.searchText = selectionText;
       findInput.value = selectionText;
     }
 
-    refreshMatches();
+    refreshMatchesNow();
     findInput.focus();
     findInput.select();
   };
 
   const getEditableFromTarget = (target) => {
-    if (!(target instanceof HTMLElement)) return null;
+    if (!isElementNode(target)) return null;
     if (target.isContentEditable) {
       return target.closest("[contenteditable]") || target;
     }
@@ -1552,8 +2557,9 @@
   };
 
   const getShortcutSelectionText = (event) => {
+    const site = getCurrentSiteKind();
     const target = getEditableFromTarget(event?.target);
-    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    if (isTextControlNode(target)) {
       const start = target.selectionStart || 0;
       const end = target.selectionEnd || 0;
       if (start !== end && end - start <= 200) return target.value.slice(start, end);
@@ -1563,26 +2569,27 @@
     return (
       getSelectionTextFromDocument(doc) ||
       getSelectionTextFromSelectionBlocks(doc) ||
-      getSelectionTextFromDocument(getBlogFrameDocument()) ||
-      getSelectionTextFromSelectionBlocks(getBlogFrameDocument())
+      getSelectionTextFromDocument(getSiteFrameDocument(site)) ||
+      getSelectionTextFromSelectionBlocks(getSiteFrameDocument(site))
     );
   };
 
   const openFromShortcut = (event, forceOpen = false) => {
+    const site = getCurrentSiteKind();
     const shortcutTarget = getEditableFromTarget(event?.target) || getActiveEditable();
     const selectionText =
       getShortcutSelectionText(event) ||
-      getSelectionTextFromSelectionBlocks(getBlogFrameDocument()) ||
+      getSelectionTextFromSelectionBlocks(getSiteFrameDocument(site)) ||
       state.lastSelectionText;
     if (root.style.display != "none") {
       const target = shortcutTarget || state.target;
       if (target) {
-        state.target = target;
+        state.target = normalizeTargetForSite(site, target);
         if (selectionText) {
           state.searchText = selectionText;
           findInput.value = selectionText;
         }
-        refreshMatches();
+        refreshMatchesNow();
       }
       findInput.focus();
       findInput.select();
@@ -1623,7 +2630,7 @@
   };
 
   const getSelectionText = (target) => {
-    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    if (isTextControlNode(target)) {
       const start = target.selectionStart || 0;
       const end = target.selectionEnd || 0;
       if (start !== end && end - start <= 200) return target.value.slice(start, end);
@@ -1670,11 +2677,20 @@
     chrome.runtime.onMessage.addListener((message) => {
       if (message && message.type === "finder-toggle") {
         if (!isTopFrame) return;
-        if (getActiveEditable()) {
-          openFromShortcut({ target: document.activeElement }, false);
+        const site = getCurrentSiteKind();
+        const wasOpen = root.style.display != "none";
+        openFromShortcut({ target: document.activeElement }, true);
+        const isOpen = root.style.display != "none";
+        const hasFrameBackedTarget =
+          isElementNode(state.target) && state.target.ownerDocument !== document;
+        if (site === SITE_KIND.NAVER && (!isOpen || !hasFrameBackedTarget)) {
+          broadcastToggle(true);
           return;
         }
-        broadcastToggle(isBlogWriteContext());
+        // Some Tistory editor contexts resolve target only inside nested frames.
+        if (!wasOpen && !isOpen) {
+          broadcastToggle(true);
+        }
       }
     });
   }
